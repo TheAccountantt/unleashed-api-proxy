@@ -31,6 +31,11 @@ def unleashed_products(req: func.HttpRequest) -> func.HttpResponse:
 def unleashed_sales_orders(req: func.HttpRequest) -> func.HttpResponse:
     return call_unleashed_api(req, "SalesOrders")
 
+@app.route(route="UnleashedSalesOrdersChunked")
+def unleashed_sales_orders_chunked(req: func.HttpRequest) -> func.HttpResponse:
+    """Get sales orders in chunks - use startPage parameter for large datasets"""
+    return call_unleashed_api_chunked(req, "SalesOrders")
+
 @app.route(route="UnleashedCreditNotes")
 def unleashed_credit_notes(req: func.HttpRequest) -> func.HttpResponse:
     return call_unleashed_api(req, "CreditNotes")
@@ -121,14 +126,20 @@ def get_single_page(endpoint: str, query_string: str, api_id: str, api_key: str)
         return func.HttpResponse(error_msg, status_code=500)
 
 def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -> func.HttpResponse:
-    """Get all pages of data with automatic pagination"""
+    """Get all pages of data with automatic pagination and intelligent timeout management"""
     try:
         all_items = []
         page_number = 1
-        max_pages = 500  # Safety limit (500,000 records max at 1000 per page)
         total_items = 0
+        start_time = time.time()
         
-        # Ensure we use 1000 records per page for efficiency
+        # Azure Functions timeout limits (in seconds)
+        # Consumption plan: 5 minutes (300s) default, 10 minutes (600s) max
+        # Premium plan: 30 minutes (1800s) max
+        AZURE_TIMEOUT_BUFFER = 30  # Keep 30 seconds buffer
+        FUNCTION_TIMEOUT = 570  # 9.5 minutes (600s - 30s buffer)
+        
+        # Ensure we use 1000 records per page for maximum efficiency
         if 'pageSize=' not in query_string:
             if query_string:
                 query_string += "&pageSize=1000"
@@ -136,8 +147,21 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
                 query_string = "pageSize=1000"
         
         logging.info(f"Starting auto-pagination for {endpoint} with query: {query_string}")
+        logging.info(f"Function timeout limit: {FUNCTION_TIMEOUT}s")
         
-        while page_number <= max_pages:
+        # Track performance metrics
+        total_api_time = 0
+        
+        while True:  # No artificial page limit - let the API or timeout decide
+            # Check if we're approaching the function timeout
+            elapsed_time = time.time() - start_time
+            remaining_time = FUNCTION_TIMEOUT - elapsed_time
+            
+            if remaining_time < 60:  # Less than 1 minute remaining
+                logging.warning(f"Approaching timeout limit. Elapsed: {elapsed_time:.1f}s, Remaining: {remaining_time:.1f}s")
+                logging.warning(f"Stopping pagination at page {page_number-1} to prevent timeout")
+                break
+            
             # Build query with pagination
             if query_string:
                 page_query = f"{query_string}&pageNumber={page_number}"
@@ -156,12 +180,29 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
                 'client-type': 'PowerBI/Integration'
             }
             
-            logging.info(f"Fetching page {page_number}: {full_url}")
+            # Calculate dynamic timeout for this request
+            # Give each request up to 1/3 of remaining time, but min 30s, max 120s
+            request_timeout = max(30, min(120, remaining_time / 3))
             
-            # Adaptive timeout based on page number
-            request_timeout = min(60 + (page_number * 2), 120)  # 60-120 seconds
+            logging.info(f"Fetching page {page_number}: timeout={request_timeout:.0f}s, remaining_func_time={remaining_time:.1f}s")
             
-            response = requests.get(full_url, headers=headers, timeout=request_timeout)
+            api_start = time.time()
+            
+            try:
+                response = requests.get(full_url, headers=headers, timeout=request_timeout)
+                api_time = time.time() - api_start
+                total_api_time += api_time
+                
+            except requests.exceptions.Timeout:
+                logging.error(f"Request timeout on page {page_number} after {request_timeout}s")
+                if page_number == 1:
+                    return func.HttpResponse(
+                        f"API request timeout on first page. The API may be slow or overloaded.",
+                        status_code=408
+                    )
+                else:
+                    logging.warning(f"Stopping pagination at page {page_number-1} due to request timeout")
+                    break
             
             if response.status_code != 200:
                 error_msg = f"Page {page_number} failed: {response.status_code} - {response.text}"
@@ -172,7 +213,7 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
                     return func.HttpResponse(error_msg, status_code=response.status_code)
                 else:
                     # If later pages fail, return what we have so far
-                    logging.warning(f"Stopping pagination at page {page_number-1} due to error")
+                    logging.warning(f"Stopping pagination at page {page_number-1} due to API error")
                     break
             
             try:
@@ -183,39 +224,64 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
                 if page_number == 1:
                     return func.HttpResponse(error_msg, status_code=500)
                 else:
+                    logging.warning(f"Stopping pagination at page {page_number-1} due to JSON error")
                     break
             
             items = page_data.get('Items', [])
             
             if not items:
-                logging.info(f"No items found on page {page_number}, stopping pagination")
+                logging.info(f"No items found on page {page_number}, pagination complete")
                 break
             
             all_items.extend(items)
             current_page_count = len(items)
             total_items += current_page_count
             
-            logging.info(f"Page {page_number}: Retrieved {current_page_count} items (Total: {total_items})")
+            # Calculate performance stats
+            avg_api_time = total_api_time / page_number
+            estimated_time_per_page = avg_api_time + 0.2  # Add processing overhead
             
-            # Check if we've got all pages
+            logging.info(f"Page {page_number}: {current_page_count} items (Total: {total_items}) - "
+                        f"API time: {api_time:.1f}s, Avg: {avg_api_time:.1f}s, Elapsed: {elapsed_time:.1f}s")
+            
+            # Check if we've got all pages according to API
             pagination = page_data.get('Pagination', {})
             total_pages = pagination.get('NumberOfPages', 1)
             
             # Log pagination info on first page
             if page_number == 1:
                 total_available = pagination.get('NumberOfItems', 0)
-                logging.info(f"Total items available: {total_available}, Total pages: {total_pages}")
+                estimated_total_time = total_pages * estimated_time_per_page
+                
+                logging.info(f"Dataset info: {total_available} items across {total_pages} pages")
+                logging.info(f"Estimated completion time: {estimated_total_time:.1f}s")
+                
+                if estimated_total_time > FUNCTION_TIMEOUT:
+                    logging.warning(f"Estimated time ({estimated_total_time:.1f}s) exceeds timeout limit ({FUNCTION_TIMEOUT}s)")
+                    logging.warning("Will fetch as many pages as possible within timeout")
             
             if page_number >= total_pages:
-                logging.info(f"Completed pagination: {page_number}/{total_pages} pages")
+                logging.info(f"Pagination complete: {page_number}/{total_pages} pages retrieved")
                 break
             
             page_number += 1
             
-            # Add small delay to avoid overwhelming the API
-            time.sleep(0.1)
+            # Dynamic delay based on API performance
+            # Faster APIs get shorter delays, slower APIs get longer delays
+            if avg_api_time < 1.0:
+                delay = 0.1
+            elif avg_api_time < 3.0:
+                delay = 0.2
+            else:
+                delay = 0.5
+                
+            time.sleep(delay)
         
-        # Return combined results
+        # Calculate final statistics
+        final_elapsed = time.time() - start_time
+        was_truncated = page_number < total_pages if 'total_pages' in locals() else False
+        
+        # Return combined results with comprehensive metadata
         result = {
             'Items': all_items,
             'Pagination': {
@@ -224,11 +290,23 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
                 'PageNumber': 1,
                 'NumberOfPages': 1,
                 'AutoPaginated': True,
-                'TotalPagesRetrieved': page_number - 1
+                'PagesRetrieved': page_number - 1,
+                'TotalPagesAvailable': total_pages if 'total_pages' in locals() else page_number - 1,
+                'Truncated': was_truncated,
+                'Performance': {
+                    'ElapsedTime': f"{final_elapsed:.1f}s",
+                    'TotalApiTime': f"{total_api_time:.1f}s",
+                    'AverageApiTimePerPage': f"{total_api_time / max(1, page_number - 1):.1f}s",
+                    'FunctionTimeoutLimit': f"{FUNCTION_TIMEOUT}s"
+                }
             }
         }
         
-        logging.info(f"Auto-pagination complete for {endpoint}: {len(all_items)} total items retrieved")
+        status_msg = f"Auto-pagination for {endpoint}: {len(all_items)} items retrieved in {final_elapsed:.1f}s"
+        if was_truncated:
+            status_msg += f" (TRUNCATED: {page_number-1}/{total_pages} pages due to timeout protection)"
+        
+        logging.info(status_msg)
         
         return func.HttpResponse(
             json.dumps(result),
@@ -238,6 +316,198 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
         
     except Exception as e:
         error_msg = f"Auto-pagination error for {endpoint}: {str(e)}"
+        logging.error(error_msg)
+        return func.HttpResponse(error_msg, status_code=500)
+
+def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.HttpResponse:
+    """Chunked pagination for very large datasets - allows multiple function calls"""
+    logging.info(f'Calling Unleashed {endpoint} API with chunked pagination')
+
+    # Get API credentials from environment variables
+    api_id = os.environ.get('UNLEASHED_API_ID')
+    api_key = os.environ.get('UNLEASHED_API_KEY')
+    
+    if not api_id or not api_key:
+        return func.HttpResponse(
+            "API credentials not configured. Please set UNLEASHED_API_ID and UNLEASHED_API_KEY environment variables.",
+            status_code=400
+        )
+
+    try:
+        # Get query string from request
+        query_string = req.url.split('?', 1)[1] if '?' in req.url else ""
+        
+        # Remove function-specific parameters
+        if 'code=' in query_string:
+            params = []
+            for param in query_string.split('&'):
+                if not param.startswith('code='):
+                    params.append(param)
+            query_string = '&'.join(params)
+        
+        # Extract chunk parameters
+        start_page = 1
+        chunk_size = 50  # pages per chunk (50,000 records)
+        
+        # Parse startPage parameter
+        if 'startPage=' in query_string:
+            for param in query_string.split('&'):
+                if param.startswith('startPage='):
+                    start_page = int(param.split('=')[1])
+                    break
+            # Remove startPage from query string
+            query_string = '&'.join([p for p in query_string.split('&') if not p.startswith('startPage=')])
+        
+        # Parse chunkSize parameter  
+        if 'chunkSize=' in query_string:
+            for param in query_string.split('&'):
+                if param.startswith('chunkSize='):
+                    chunk_size = int(param.split('=')[1])
+                    break
+            # Remove chunkSize from query string
+            query_string = '&'.join([p for p in query_string.split('&') if not p.startswith('chunkSize=')])
+        
+        return get_chunked_pages(endpoint, query_string, api_id, api_key, start_page, chunk_size)
+        
+    except Exception as e:
+        error_msg = f"Error processing chunked {endpoint} request: {str(e)}"
+        logging.error(error_msg)
+        return func.HttpResponse(error_msg, status_code=500)
+
+def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: str, start_page: int, chunk_size: int) -> func.HttpResponse:
+    """Get a chunk of pages for very large datasets"""
+    try:
+        all_items = []
+        page_number = start_page
+        end_page = start_page + chunk_size - 1
+        total_items = 0
+        start_time = time.time()
+        
+        # Ensure we use 1000 records per page for maximum efficiency
+        if 'pageSize=' not in query_string:
+            if query_string:
+                query_string += "&pageSize=1000"
+            else:
+                query_string = "pageSize=1000"
+        
+        logging.info(f"Starting chunked pagination for {endpoint}: pages {start_page}-{end_page}")
+        
+        # First, get page 1 to understand the dataset size
+        first_page_query = f"{query_string}&pageNumber=1" if query_string else "pageSize=1000&pageNumber=1"
+        signature = generate_signature(first_page_query, api_key)
+        
+        base_url = f"https://api.unleashedsoftware.com/{endpoint}"
+        full_url = f"{base_url}?{first_page_query}"
+        
+        headers = {
+            'Accept': 'application/json',
+            'api-auth-id': api_id,
+            'api-auth-signature': signature,
+            'client-type': 'PowerBI/Integration'
+        }
+        
+        response = requests.get(full_url, headers=headers, timeout=60)
+        
+        if response.status_code != 200:
+            return func.HttpResponse(
+                f"Failed to get dataset info: {response.status_code} - {response.text}",
+                status_code=response.status_code
+            )
+        
+        try:
+            first_page_data = response.json()
+        except json.JSONDecodeError as e:
+            return func.HttpResponse(f"Invalid JSON response: {str(e)}", status_code=500)
+        
+        pagination = first_page_data.get('Pagination', {})
+        total_pages = pagination.get('NumberOfPages', 1)
+        total_available = pagination.get('NumberOfItems', 0)
+        
+        logging.info(f"Dataset info: {total_available} items across {total_pages} pages")
+        
+        # If start_page is 1, include the first page data we already fetched
+        if start_page == 1:
+            items = first_page_data.get('Items', [])
+            if items:
+                all_items.extend(items)
+                total_items += len(items)
+                logging.info(f"Page 1: {len(items)} items")
+            page_number = 2
+        
+        # Adjust end_page if it exceeds total pages
+        actual_end_page = min(end_page, total_pages)
+        
+        # Fetch remaining pages in the chunk
+        while page_number <= actual_end_page:
+            page_query = f"{query_string}&pageNumber={page_number}" if query_string else f"pageSize=1000&pageNumber={page_number}"
+            signature = generate_signature(page_query, api_key)
+            full_url = f"{base_url}?{page_query}"
+            
+            response = requests.get(full_url, headers=headers, timeout=60)
+            
+            if response.status_code != 200:
+                error_msg = f"Page {page_number} failed: {response.status_code} - {response.text}"
+                logging.error(error_msg)
+                break
+            
+            try:
+                page_data = response.json()
+            except json.JSONDecodeError as e:
+                logging.error(f"Invalid JSON on page {page_number}: {str(e)}")
+                break
+            
+            items = page_data.get('Items', [])
+            if not items:
+                logging.info(f"No items on page {page_number}")
+                break
+            
+            all_items.extend(items)
+            total_items += len(items)
+            logging.info(f"Page {page_number}: {len(items)} items (Total: {total_items})")
+            
+            page_number += 1
+            time.sleep(0.1)  # Small delay
+        
+        # Calculate chunk information
+        pages_retrieved = page_number - start_page
+        has_more_pages = actual_end_page < total_pages
+        next_start_page = actual_end_page + 1 if has_more_pages else None
+        
+        # Return chunk results with navigation info
+        result = {
+            'Items': all_items,
+            'ChunkInfo': {
+                'StartPage': start_page,
+                'EndPage': actual_end_page,
+                'PagesRetrieved': pages_retrieved,
+                'ItemsInChunk': len(all_items),
+                'ChunkSize': chunk_size,
+                'HasMorePages': has_more_pages,
+                'NextStartPage': next_start_page,
+                'TotalPages': total_pages,
+                'TotalItemsAvailable': total_available,
+                'ElapsedTime': f"{time.time() - start_time:.1f}s"
+            },
+            'Pagination': {
+                'NumberOfItems': len(all_items),
+                'PageSize': len(all_items),
+                'PageNumber': 1,
+                'NumberOfPages': 1,
+                'AutoPaginated': True,
+                'ChunkedMode': True
+            }
+        }
+        
+        logging.info(f"Chunk complete: pages {start_page}-{actual_end_page}, {len(all_items)} items, has_more={has_more_pages}")
+        
+        return func.HttpResponse(
+            json.dumps(result),
+            status_code=200,
+            headers={'Content-Type': 'application/json'}
+        )
+        
+    except Exception as e:
+        error_msg = f"Chunked pagination error for {endpoint}: {str(e)}"
         logging.error(error_msg)
         return func.HttpResponse(error_msg, status_code=500)
 
