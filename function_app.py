@@ -158,7 +158,10 @@ def get_all_pages(endpoint: str, query_string: str, api_id: str, api_key: str) -
             
             logging.info(f"Fetching page {page_number}: {full_url}")
             
-            response = requests.get(full_url, headers=headers, timeout=600)
+            # Adaptive timeout based on page number
+            request_timeout = min(60 + (page_number * 2), 120)  # 60-120 seconds
+            
+            response = requests.get(full_url, headers=headers, timeout=request_timeout)
             
             if response.status_code != 200:
                 error_msg = f"Page {page_number} failed: {response.status_code} - {response.text}"
