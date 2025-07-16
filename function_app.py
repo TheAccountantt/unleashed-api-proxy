@@ -60,9 +60,19 @@ def unleashed_sales_orders_chunked(req: func.HttpRequest) -> func.HttpResponse:
 def unleashed_credit_notes(req: func.HttpRequest) -> func.HttpResponse:
     return call_unleashed_api(req, "CreditNotes")
 
+@app.route(route="UnleashedCreditNotesChunked")
+def unleashed_credit_notes_chunked(req: func.HttpRequest) -> func.HttpResponse:
+    """Get credit notes in chunks - recommended for large datasets"""
+    return call_unleashed_api_chunked(req, "CreditNotes")
+
 @app.route(route="UnleashedPurchaseOrders")
 def unleashed_purchase_orders(req: func.HttpRequest) -> func.HttpResponse:
     return call_unleashed_api(req, "PurchaseOrders")
+
+@app.route(route="UnleashedPurchaseOrdersChunked")
+def unleashed_purchase_orders_chunked(req: func.HttpRequest) -> func.HttpResponse:
+    """Get purchase orders in chunks - recommended for large datasets"""
+    return call_unleashed_api_chunked(req, "PurchaseOrders")
 
 @app.route(route="UnleashedDatasetInfo")
 def unleashed_dataset_info(req: func.HttpRequest) -> func.HttpResponse:
@@ -130,6 +140,30 @@ def unleashed_dataset_info(req: func.HttpRequest) -> func.HttpResponse:
                 '1. First call: /UnleashedInvoicesChunked',
                 '2. Check ChunkInfo.HasMorePages in response',
                 '3. If true, call: /UnleashedInvoicesChunked?startPage={NextStartPage}',
+                '4. Repeat until HasMorePages = false'
+            ]
+        },
+        'CreditNotes': {
+            'description': 'Credit notes dataset',
+            'recommendedChunkSize': 20,
+            'estimatedItemsPerChunk': 20000,
+            'chunkedEndpoint': '/UnleashedCreditNotesChunked',
+            'usage': [
+                '1. First call: /UnleashedCreditNotesChunked',
+                '2. Check ChunkInfo.HasMorePages in response',
+                '3. If true, call: /UnleashedCreditNotesChunked?startPage={NextStartPage}',
+                '4. Repeat until HasMorePages = false'
+            ]
+        },
+        'PurchaseOrders': {
+            'description': 'Purchase orders dataset',
+            'recommendedChunkSize': 20,
+            'estimatedItemsPerChunk': 20000,
+            'chunkedEndpoint': '/UnleashedPurchaseOrdersChunked',
+            'usage': [
+                '1. First call: /UnleashedPurchaseOrdersChunked',
+                '2. Check ChunkInfo.HasMorePages in response',
+                '3. If true, call: /UnleashedPurchaseOrdersChunked?startPage={NextStartPage}',
                 '4. Repeat until HasMorePages = false'
             ]
         }
