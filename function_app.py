@@ -513,13 +513,13 @@ def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.Htt
         
         # Endpoint-specific default chunk sizes - optimized for gateway timeout avoidance
         endpoint_defaults = {
-            'SalesOrders': 10,      # 10,000 records per chunk (10 pages * 1000) - reduced for reliability
-            'StockOnHand': 10,      # 10,000 records per chunk (slower endpoint)
-            'Products': 10,         # 10,000 records per chunk (slower endpoint)
-            'Invoices': 10,         # 10,000 records per chunk
-            'Customers': 10,        # 10,000 records per chunk (typically faster)
-            'CreditNotes': 10,      # 10,000 records per chunk
-            'PurchaseOrders': 20    # 20,000 records per chunk
+            'SalesOrders': 5,      # 5,000 records per chunk (5 pages * 1000) - reduced for reliability
+            'StockOnHand': 5,      # 5,000 records per chunk (slower endpoint)
+            'Products': 5,         # 5,000 records per chunk (slower endpoint)
+            'Invoices': 5,         # 5,000 records per chunk
+            'Customers': 5,        # 5,000 records per chunk (typically faster)
+            'CreditNotes': 5,      # 5,000 records per chunk
+            'PurchaseOrders': 5     # 5,000 records per chunk
         }
         
         chunk_size = endpoint_defaults.get(endpoint, 15)  # Default to 15 pages if endpoint not found
