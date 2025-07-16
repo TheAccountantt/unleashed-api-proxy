@@ -106,6 +106,14 @@ def unleashed_products(req: func.HttpRequest) -> func.HttpResponse:
 def unleashed_sales_orders(req: func.HttpRequest) -> func.HttpResponse:
     return call_unleashed_api(req, "SalesOrders")
 
+@app.route(route="UnleashedCreditNotes")
+def unleashed_credit_notes(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api(req, "CreditNotes")
+
+@app.route(route="UnleashedPurchaseOrders")
+def unleashed_purchase_orders(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api(req, "PurchaseOrders")
+
 def call_unleashed_api(req: func.HttpRequest, endpoint: str) -> func.HttpResponse:
     """Generic function to call any Unleashed API endpoint"""
     logging.info(f'Calling Unleashed {endpoint} API')
