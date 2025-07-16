@@ -85,8 +85,8 @@ def unleashed_dataset_info(req: func.HttpRequest) -> func.HttpResponse:
     endpoint_info = {
         'SalesOrders': {
             'description': 'Sales orders dataset',
-            'recommendedChunkSize': 20,
-            'estimatedItemsPerChunk': 20000,
+            'recommendedChunkSize': 25,
+            'estimatedItemsPerChunk': 25000,
             'chunkedEndpoint': '/UnleashedSalesOrdersChunked',
             'usage': [
                 '1. First call: /UnleashedSalesOrdersChunked',
@@ -511,9 +511,9 @@ def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.Htt
         # Extract chunk parameters
         start_page = 1
         
-        # Endpoint-specific default chunk sizes (much more conservative)
+        # Endpoint-specific default chunk sizes - adjusted for better performance
         endpoint_defaults = {
-            'SalesOrders': 20,      # 20,000 records per chunk (20 pages * 1000)
+            'SalesOrders': 25,      # 25,000 records per chunk (25 pages * 1000) - increased from 20
             'StockOnHand': 15,      # 15,000 records per chunk (slower endpoint)
             'Products': 10,         # 10,000 records per chunk (slower endpoint)
             'Invoices': 25,         # 25,000 records per chunk
@@ -560,7 +560,7 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
         start_time = time.time()
         
         # Conservative timeout management for chunked requests
-        CHUNK_TIMEOUT = 500  # 8 minutes and 20 seconds (conservative)
+        CHUNK_TIMEOUT = 550  # 9 minutes and 10 seconds - increased from 500s
         
         # Ensure we use 1000 records per page for maximum efficiency
         if 'pageSize=' not in query_string:
@@ -674,7 +674,7 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             
             # Calculate remaining time for this request
             remaining_time = CHUNK_TIMEOUT - elapsed_time
-            request_timeout = max(30, min(90, remaining_time / 2))  # Conservative per-request timeout
+            request_timeout = max(45, min(120, remaining_time / 2))  # More generous: 45-120 seconds
             
             logging.info(f"Fetching page {page_number}/{actual_end_page} (timeout: {request_timeout:.0f}s, elapsed: {elapsed_time:.1f}s)")
             
@@ -706,9 +706,11 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             
             page_number += 1
             
-            # Conservative delay, especially for slower endpoints
+            # Endpoint-specific delays optimized for performance
             if endpoint in ['StockOnHand', 'Products']:
                 time.sleep(0.3)  # Longer delay for slower endpoints
+            elif endpoint in ['SalesOrders']:
+                time.sleep(0.1)  # Minimal delay for sales orders (usually fast)
             else:
                 time.sleep(0.15)  # Standard delay
         
