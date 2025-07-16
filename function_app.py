@@ -85,8 +85,8 @@ def unleashed_dataset_info(req: func.HttpRequest) -> func.HttpResponse:
     endpoint_info = {
         'SalesOrders': {
             'description': 'Sales orders dataset',
-            'recommendedChunkSize': 25,
-            'estimatedItemsPerChunk': 25000,
+            'recommendedChunkSize': 15,
+            'estimatedItemsPerChunk': 15000,
             'chunkedEndpoint': '/UnleashedSalesOrdersChunked',
             'usage': [
                 '1. First call: /UnleashedSalesOrdersChunked',
@@ -511,9 +511,9 @@ def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.Htt
         # Extract chunk parameters
         start_page = 1
         
-        # Endpoint-specific default chunk sizes - adjusted for better performance
+        # Endpoint-specific default chunk sizes - optimized for gateway timeout avoidance
         endpoint_defaults = {
-            'SalesOrders': 25,      # 25,000 records per chunk (25 pages * 1000) - increased from 20
+            'SalesOrders': 15,      # 15,000 records per chunk (15 pages * 1000) - reduced for reliability
             'StockOnHand': 15,      # 15,000 records per chunk (slower endpoint)
             'Products': 10,         # 10,000 records per chunk (slower endpoint)
             'Invoices': 25,         # 25,000 records per chunk
@@ -559,8 +559,8 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
         total_items = 0
         start_time = time.time()
         
-        # Conservative timeout management for chunked requests
-        CHUNK_TIMEOUT = 550  # 9 minutes and 10 seconds - increased from 500s
+        # Conservative timeout management for chunked requests - more aggressive for gateway timeout avoidance
+        CHUNK_TIMEOUT = 480  # 8 minutes - reduced from 550s to avoid gateway timeouts
         
         # Ensure we use 1000 records per page for maximum efficiency
         if 'pageSize=' not in query_string:
@@ -570,6 +570,11 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
                 query_string = "pageSize=1000"
         
         logging.info(f"Starting chunked pagination for {endpoint}: pages {start_page}-{end_page} (max {chunk_size} pages)")
+        
+        # Gateway timeout protection - send early response if chunk looks too large
+        if chunk_size > 20 and endpoint in ['SalesOrders', 'StockOnHand', 'Products']:
+            logging.warning(f"Large chunk size ({chunk_size}) for {endpoint} - may cause gateway timeout")
+            logging.warning("Consider using smaller chunks (e.g., chunkSize=10-15) for better reliability")
         
         # First, get page 1 to understand the dataset size (only if start_page is 1)
         if start_page == 1:
@@ -657,12 +662,20 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             'client-type': 'PowerBI/Integration'
         }
         
-        # Fetch remaining pages in the chunk
+        # Fetch remaining pages in the chunk with gateway timeout protection
+        gateway_timeout_protection = 420  # 7 minutes - hard stop to avoid gateway timeouts
+        
         while page_number <= actual_end_page:
-            # Check timeout
+            # Check both chunk timeout and gateway timeout protection
             elapsed_time = time.time() - start_time
             if elapsed_time > CHUNK_TIMEOUT:
                 logging.warning(f"Chunk timeout reached after {elapsed_time:.1f}s at page {page_number-1}")
+                break
+            
+            # Gateway timeout protection - stricter limit
+            if elapsed_time > gateway_timeout_protection:
+                logging.warning(f"Gateway timeout protection triggered after {elapsed_time:.1f}s at page {page_number-1}")
+                logging.warning("Stopping early to prevent gateway timeout - use smaller chunks for complete data")
                 break
             
             page_query = f"{query_string}&pageNumber={page_number}" if query_string else f"pageSize=1000&pageNumber={page_number}"
@@ -672,9 +685,9 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             base_url = f"https://api.unleashedsoftware.com/{endpoint}"
             full_url = f"{base_url}?{page_query}"
             
-            # Calculate remaining time for this request
+            # Calculate remaining time for this request - more aggressive timeouts
             remaining_time = CHUNK_TIMEOUT - elapsed_time
-            request_timeout = max(45, min(120, remaining_time / 2))  # More generous: 45-120 seconds
+            request_timeout = max(30, min(90, remaining_time / 3))  # Reduced max from 120 to 90 seconds
             
             logging.info(f"Fetching page {page_number}/{actual_end_page} (timeout: {request_timeout:.0f}s, elapsed: {elapsed_time:.1f}s)")
             
@@ -706,13 +719,13 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             
             page_number += 1
             
-            # Endpoint-specific delays optimized for performance
+            # Endpoint-specific delays optimized for gateway timeout avoidance
             if endpoint in ['StockOnHand', 'Products']:
-                time.sleep(0.3)  # Longer delay for slower endpoints
+                time.sleep(0.2)  # Reduced delay for slower endpoints
             elif endpoint in ['SalesOrders']:
-                time.sleep(0.1)  # Minimal delay for sales orders (usually fast)
+                time.sleep(0.05)  # Minimal delay for sales orders to maximize speed
             else:
-                time.sleep(0.15)  # Standard delay
+                time.sleep(0.1)  # Reduced standard delay
         
         # Calculate chunk information
         pages_retrieved = page_number - start_page
@@ -736,7 +749,9 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
                 'Performance': {
                     'ElapsedTime': f"{final_elapsed:.1f}s",
                     'ChunkTimeoutLimit': f"{CHUNK_TIMEOUT}s",
-                    'TimedOut': final_elapsed > CHUNK_TIMEOUT
+                    'GatewayTimeoutProtection': f"{gateway_timeout_protection}s",
+                    'TimedOut': final_elapsed > CHUNK_TIMEOUT,
+                    'GatewayTimeoutProtectionTriggered': final_elapsed > gateway_timeout_protection
                 }
             },
             'Pagination': {
