@@ -511,9 +511,9 @@ def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.Htt
         # Extract chunk parameters
         start_page = 1
         
-        # Endpoint-specific default chunk sizes - optimized for gateway timeout avoidance
+        # Endpoint-specific default chunk sizes - optimized for Power BI and gateway timeout avoidance
         endpoint_defaults = {
-            'SalesOrders': 5,      # 5,000 records per chunk (5 pages * 1000) - reduced for reliability
+            'SalesOrders': 15,     # 15,000 records per chunk (15 pages * 1000) - optimized for Power BI reliability
             'StockOnHand': 3,      # 3,000 records per chunk (slower endpoint)
             'Products': 2,         # 2,000 records per chunk (slower endpoint)
             'Invoices': 3,         # 3,000 records per chunk
