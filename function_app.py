@@ -617,6 +617,8 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
                 all_items.extend(items)
                 total_items += len(items)
                 logging.info(f"Page 1: {len(items)} items")
+                
+            # Set the next page to start from page 2
             page_number = 2
         else:
             # For chunks starting after page 1, we need to get the dataset info differently
@@ -651,6 +653,9 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             except json.JSONDecodeError as e:
                 total_pages = 9999  # Fallback if we can't get info
                 total_available = 0
+                
+            # For subsequent chunks, start from the requested start_page
+            page_number = start_page
         
         # Adjust end_page if it exceeds total pages
         actual_end_page = min(end_page, total_pages)
@@ -727,8 +732,14 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             else:
                 time.sleep(0.1)  # Reduced standard delay
         
-        # Calculate chunk information
-        pages_retrieved = page_number - start_page
+        # Calculate chunk information - fix page counting for accurate results
+        if start_page == 1:
+            # For first chunk, we already processed page 1, so count from page 2
+            pages_retrieved = (page_number - 1) - start_page + 1  # Include page 1 that we already got
+        else:
+            # For subsequent chunks, count normally
+            pages_retrieved = (page_number - 1) - start_page + 1
+            
         has_more_pages = actual_end_page < total_pages if 'total_pages' in locals() else False
         next_start_page = actual_end_page + 1 if has_more_pages else None
         final_elapsed = time.time() - start_time
