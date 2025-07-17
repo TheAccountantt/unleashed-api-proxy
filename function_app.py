@@ -573,6 +573,9 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
         
         logging.info(f"Starting chunked pagination for {endpoint}: pages {start_page}-{end_page} (chunk size: {chunk_size})")
         
+        # Define base URL for all requests
+        base_url = f"https://api.unleashedsoftware.com/{endpoint}"
+        
         # Gateway timeout protection warning
         if chunk_size > 20 and endpoint in ['SalesOrders', 'StockOnHand', 'Products']:
             logging.warning(f"Large chunk size ({chunk_size}) for {endpoint} - may cause gateway timeout")
@@ -586,7 +589,6 @@ def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: st
             info_query = f"{query_string}&pageNumber=1" if query_string else "pageSize=1000&pageNumber=1"
             signature = generate_signature(info_query, api_key)
             
-            base_url = f"https://api.unleashedsoftware.com/{endpoint}"
             full_url = f"{base_url}?{info_query}"
             
             headers = {
