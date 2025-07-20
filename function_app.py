@@ -11,40 +11,26 @@ import azure.functions as func
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
+# Define all your routes to use the single, robust chunking function
 @app.route(route="UnleashedStockOnHand")
-def unleashed_stock_on_hand(req: func.HttpRequest) -> func.HttpResponse:
-    """Get stock on hand in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "StockOnHand")
-
 @app.route(route="UnleashedCustomers")
-def unleashed_customers(req: func.HttpRequest) -> func.HttpResponse:
-    """Get customers in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "Customers")
-
 @app.route(route="UnleashedInvoices")
-def unleashed_invoices(req: func.HttpRequest) -> func.HttpResponse:
-    """Get invoices in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "Invoices")
-
 @app.route(route="UnleashedProducts")
-def unleashed_products(req: func.HttpRequest) -> func.HttpResponse:
-    """Get products in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "Products")
-
 @app.route(route="UnleashedSalesOrders")
-def unleashed_sales_orders(req: func.HttpRequest) -> func.HttpResponse:
-    """Get sales orders in chunks - use startPage parameter for large datasets"""
-    return call_unleashed_api_chunked(req, "SalesOrders")
-
 @app.route(route="UnleashedCreditNotes")
-def unleashed_credit_notes(req: func.HttpRequest) -> func.HttpResponse:
-    """Get credit notes in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "CreditNotes")
-
 @app.route(route="UnleashedPurchaseOrders")
-def unleashed_purchase_orders(req: func.HttpRequest) -> func.HttpResponse:
-    """Get purchase orders in chunks - recommended for large datasets"""
-    return call_unleashed_api_chunked(req, "PurchaseOrders")
+def handle_request(req: func.HttpRequest) -> func.HttpResponse:
+    """A single route handler for all Unleashed endpoints."""
+    # Extract the endpoint name from the route that was called
+    # e.g., "/api/UnleashedSalesOrders" -> "SalesOrders"
+    endpoint = req.route_params.get('route').replace('Unleashed', '')
+    if not endpoint:
+        # Fallback for older function versions or direct calls
+        endpoint_from_url = req.url.split('/')[-1].split('?')[0].replace('Unleashed', '')
+        endpoint = endpoint_from_url if endpoint_from_url else "SalesOrders"
+
+    return call_unleashed_api_chunked(req, endpoint)
+
 
 def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.HttpResponse:
     """Chunked pagination for very large datasets - allows multiple function calls"""
@@ -61,210 +47,121 @@ def call_unleashed_api_chunked(req: func.HttpRequest, endpoint: str) -> func.Htt
         )
 
     try:
-        # Get query string from request
-        query_string = req.url.split('?', 1)[1] if '?' in req.url else ""
-        
-        # Remove function-specific parameters
-        if 'code=' in query_string:
-            params = []
-            for param in query_string.split('&'):
-                if not param.startswith('code='):
-                    params.append(param)
-            query_string = '&'.join(params)
-        
+        # Get query string from request, excluding the function-specific 'code' parameter
+        params = req.params.copy()
+        params.pop('code', None) # Safely remove the 'code' key if it exists
+
         # Extract chunk parameters
-        start_page = 1
+        start_page = int(params.pop('startPage', 1))
         
-        # Endpoint-specific default chunk sizes - optimized for Power BI and gateway timeout avoidance
+        # Endpoint-specific default chunk sizes
         endpoint_defaults = {
-            'SalesOrders': 15,     # 15,000 records per chunk (15 pages * 1000) - optimized for Power BI reliability
-            'StockOnHand': 15,      # Increased from 3 to 15 for consistency, can be adjusted if timeouts occur
-            'Products': 10,         # 10,000 records per chunk (slower endpoint)
-            'Invoices': 25,         # 25,000 records per chunk
-            'Customers': 30,        # 30,000 records per chunk (typically faster)
-            'CreditNotes': 20,      # 20,000 records per chunk
-            'PurchaseOrders': 20    # 20,000 records per chunk
+            'SalesOrders': 15, 'StockOnHand': 15, 'Products': 10,
+            'Invoices': 25, 'Customers': 30, 'CreditNotes': 20, 'PurchaseOrders': 20
         }
+        default_chunk_size = endpoint_defaults.get(endpoint, 15)
+        chunk_size = int(params.pop('chunkSize', default_chunk_size))
+
+        # The remaining params are the user's filters (e.g., orderDate, orderStatus)
+        filter_query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
         
-        chunk_size = endpoint_defaults.get(endpoint, 15)  # Default to 15 pages if endpoint not found
-        
-        # Parse startPage parameter from query string
-        if 'startPage=' in query_string:
-            for param in query_string.split('&'):
-                if param.startswith('startPage='):
-                    start_page = int(param.split('=')[1])
-                    break
-            # Remove startPage from query string for API call
-            query_string = '&'.join([p for p in query_string.split('&') if not p.startswith('startPage=')])
-        
-        # Allow override of default chunk size via query string
-        if 'chunkSize=' in query_string:
-            for param in query_string.split('&'):
-                if param.startswith('chunkSize='):
-                    chunk_size = int(param.split('=')[1])
-                    break
-            # Remove chunkSize from query string for API call
-            query_string = '&'.join([p for p in query_string.split('&') if not p.startswith('chunkSize=')])
-        
-        logging.info(f"Using chunk size: {chunk_size} pages ({chunk_size * 1000} records) for {endpoint}")
-        return get_chunked_pages(endpoint, query_string, api_id, api_key, start_page, chunk_size)
+        logging.info(f"Endpoint: {endpoint}, Start Page: {start_page}, Chunk Size: {chunk_size}, Filters: '{filter_query_string}'")
+        return get_chunked_pages(endpoint, filter_query_string, api_id, api_key, start_page, chunk_size)
         
     except Exception as e:
         error_msg = f"Error processing chunked {endpoint} request: {str(e)}"
-        logging.error(error_msg)
+        logging.error(error_msg, exc_info=True)
         return func.HttpResponse(error_msg, status_code=500)
 
 def get_chunked_pages(endpoint: str, query_string: str, api_id: str, api_key: str, start_page: int, chunk_size: int) -> func.HttpResponse:
     """Get a chunk of pages for very large datasets with conservative timeout management"""
     try:
         all_items = []
-        total_items = 0
+        requested_pages_in_chunk = [] # DEBUG: list to store page numbers we request
         start_time = time.time()
         
-        # Conservative timeout management for chunked requests
-        CHUNK_TIMEOUT = 480  # 8 minutes
-        gateway_timeout_protection = 420  # 7 minutes - hard stop to avoid gateway timeouts
-        
-        # Ensure we use 1000 records per page for maximum efficiency
-        if 'pageSize=' not in query_string:
-            if query_string:
-                query_string += "&pageSize=1000"
-            else:
-                query_string = "pageSize=1000"
-        
-        # Calculate the exact page range for this chunk
-        end_page = start_page + chunk_size - 1
-        
-        logging.info(f"Starting chunked pagination for {endpoint}: pages {start_page}-{end_page} (chunk size: {chunk_size})")
-        
-        # Define base URL for all requests
         base_url = f"https://api.unleashedsoftware.com/{endpoint}"
         
-        total_pages = None
-        total_available = None
+        # --- Get Metadata First ---
+        # We need the total number of pages to calculate the correct range for this chunk.
+        # Always add pageSize=1 to the metadata call to minimize data transfer.
+        meta_query = f"{query_string}&pageSize=1" if query_string else "pageSize=1"
+        meta_signature = generate_signature(meta_query, api_key)
+        meta_headers = {'Accept': 'application/json', 'api-auth-id': api_id, 'api-auth-signature': meta_signature}
         
-        # Get total pages info first to manage pagination loop effectively
-        # This call also helps verify the query and credentials before starting the main loop
-        info_query = f"{query_string}&pageNumber=1" if query_string else "pageSize=1000&pageNumber=1"
-        info_signature = generate_signature(info_query, api_key)
-        info_headers = {
-            'Accept': 'application/json', 'api-auth-id': api_id,
-            'api-auth-signature': info_signature, 'client-type': 'PowerBI/Integration'
-        }
-        info_url = f"{base_url}?{info_query}"
+        meta_response = requests.get(f"{base_url}?{meta_query}", headers=meta_headers, timeout=60)
+        if meta_response.status_code != 200:
+            return func.HttpResponse(f"Failed to get dataset metadata: {meta_response.text}", status_code=meta_response.status_code)
         
-        try:
-            info_response = requests.get(info_url, headers=info_headers, timeout=60)
-            if info_response.status_code != 200:
-                return func.HttpResponse(
-                    f"Failed to get dataset info: {info_response.status_code} - {info_response.text}",
-                    status_code=info_response.status_code
-                )
-            info_data = info_response.json()
-            pagination = info_data.get('Pagination', {})
-            total_pages = pagination.get('NumberOfPages', 1)
-            total_available = pagination.get('NumberOfItems', 0)
-            logging.info(f"Dataset info: {total_available} items across {total_pages} pages")
-        except requests.exceptions.Timeout:
-            return func.HttpResponse("Timeout when getting dataset info. The API may be slow.", status_code=408)
-        except json.JSONDecodeError as e:
-            return func.HttpResponse(f"Invalid JSON response when getting dataset info: {str(e)}", status_code=500)
+        pagination_info = meta_response.json().get('Pagination', {})
+        total_pages = pagination_info.get('NumberOfPages', 0)
+        total_items_available = pagination_info.get('NumberOfItems', 0)
+        
+        if total_pages == 0: # No data to fetch
+             return func.HttpResponse(json.dumps({'Items': [], 'ChunkInfo': {'Message': 'No data found for the specified filters.'}}), status_code=200)
 
-        # The actual last page we should fetch in this chunk
-        actual_end_page = min(end_page, total_pages)
+        # --- Fetch Pages for this Chunk ---
+        # Calculate the real end page for this chunk, ensuring it doesn't exceed the total pages available.
+        end_page = min(start_page + chunk_size - 1, total_pages)
         
-        headers = {'Accept': 'application/json', 'api-auth-id': api_id, 'api-auth-signature': '', 'client-type': 'PowerBI/Integration'}
-        
-        # Fetch each page in the requested range
-        for page_number in range(start_page, actual_end_page + 1):
-            elapsed_time = time.time() - start_time
-            if elapsed_time > gateway_timeout_protection:
-                logging.warning(f"Gateway timeout protection triggered after {elapsed_time:.1f}s at page {page_number-1}")
-                break
+        for page_number in range(start_page, end_page + 1):
+            # Always include pageSize=1000 for maximum efficiency on actual data calls
+            page_query_parts = [query_string] if query_string else []
+            page_query_parts.append(f"pageSize=1000")
+            page_query_parts.append(f"pageNumber={page_number}")
             
-            page_query = f"{query_string}&pageNumber={page_number}" if query_string else f"pageSize=1000&pageNumber={page_number}"
+            page_query = '&'.join(filter(None, page_query_parts))
+            
             signature = generate_signature(page_query, api_key)
-            headers['api-auth-signature'] = signature
+            headers = {'Accept': 'application/json', 'api-auth-id': api_id, 'api-auth-signature': signature}
             
-            full_url = f"{base_url}?{page_query}"
-            
-            request_timeout = max(30, min(90, (CHUNK_TIMEOUT - elapsed_time) / 2))
-            
-            logging.info(f"Fetching page {page_number}/{actual_end_page} (timeout: {request_timeout:.0f}s, elapsed: {elapsed_time:.1f}s)")
-            
+            logging.info(f"Requesting page {page_number} of {total_pages}...")
+            requested_pages_in_chunk.append(page_number) # DEBUG: Record the page we are requesting
+
             try:
-                response = requests.get(full_url, headers=headers, timeout=request_timeout)
+                response = requests.get(f"{base_url}?{page_query}", headers=headers, timeout=90)
                 if response.status_code != 200:
-                    logging.error(f"Page {page_number} failed: {response.status_code} - {response.text}")
-                    break
+                    logging.error(f"API call failed for page {page_number}: {response.text}")
+                    break # Stop this chunk on failure
                 
-                page_data = response.json()
-                items = page_data.get('Items', [])
+                items = response.json().get('Items', [])
                 if not items:
-                    logging.info(f"No items on page {page_number}, stopping chunk.")
-                    break
-                
+                    break # No more items, end of data
                 all_items.extend(items)
-                total_items += len(items)
-                
+
             except requests.exceptions.Timeout:
-                logging.error(f"Request timeout on page {page_number} after {request_timeout:.0f}s")
+                logging.error(f"Request timeout on page {page_number}")
                 break
-            except json.JSONDecodeError as e:
-                logging.error(f"Invalid JSON on page {page_number}: {str(e)}")
+            except Exception as e:
+                logging.error(f"An unexpected error occurred on page {page_number}: {str(e)}")
                 break
-            
-            # Dynamic delay to be kind to the API
-            time.sleep(0.1)
         
-        final_elapsed = time.time() - start_time
-        pages_retrieved = len(all_items) > 0 and (page_number - start_page + 1) or 0
-        has_more_pages = actual_end_page < total_pages
-        next_start_page = actual_end_page + 1 if has_more_pages else None
+        # --- Prepare Response ---
+        has_more_pages = end_page < total_pages
+        next_start_page = end_page + 1 if has_more_pages else None
         
         result = {
             'Items': all_items,
             'ChunkInfo': {
                 'StartPage': start_page,
-                'EndPage': page_number,
-                'RequestedChunkSize': chunk_size,
-                'PagesRetrievedInChunk': pages_retrieved,
-                'ItemsInChunk': len(all_items),
-                'HasMorePages': has_more_pages,
-                'NextStartPage': next_start_page,
+                'EndPage': end_page,
+                'PagesRequestedInChunk': requested_pages_in_chunk, # DEBUG: The list of pages we actually requested
                 'TotalPagesAvailable': total_pages,
-                'TotalItemsAvailable': total_available,
-                'Performance': {
-                    'ElapsedTime': f"{final_elapsed:.1f}s",
-                    'ChunkTimeoutLimit': f"{CHUNK_TIMEOUT}s"
-                }
-            },
-            'Pagination': { # Included for compatibility with Power BI if it expects this structure
-                'NumberOfItems': len(all_items),
-                'PageSize': len(all_items),
-                'PageNumber': 1,
-                'NumberOfPages': 1,
-                'ChunkedMode': True
+                'TotalItemsAvailable': total_items_available,
+                'HasMorePages': has_more_pages,
+                'NextStartPage': next_start_page
             }
         }
-        
-        status_msg = f"Chunk complete for {endpoint}: pages {start_page}-{page_number}, {len(all_items)} items in {final_elapsed:.1f}s"
-        logging.info(status_msg)
         
         return func.HttpResponse(json.dumps(result), status_code=200, headers={'Content-Type': 'application/json'})
         
     except Exception as e:
-        error_msg = f"Chunked pagination error for {endpoint}: {str(e)}"
-        logging.error(error_msg, exc_info=True)
-        return func.HttpResponse(error_msg, status_code=500)
+        logging.error(f"Critical error in get_chunked_pages: {str(e)}", exc_info=True)
+        return func.HttpResponse(f"A critical error occurred: {str(e)}", status_code=500)
 
 def generate_signature(query_string, api_key):
     """Generate HMAC-SHA256 signature for Unleashed API"""
-    try:
-        key_bytes = api_key.encode('utf-8')
-        query_bytes = query_string.encode('utf-8')
-        signature = hmac.new(key_bytes, query_bytes, hashlib.sha256)
-        return base64.b64encode(signature.digest()).decode('utf-8')
-    except Exception as e:
-        logging.error(f"Error generating signature: {str(e)}")
-        raise
+    key_bytes = api_key.encode('utf-8')
+    query_bytes = query_string.encode('utf-8')
+    signature = hmac.new(key_bytes, query_bytes, hashlib.sha256)
+    return base64.b64encode(signature.digest()).decode('utf-8')
