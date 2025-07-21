@@ -71,7 +71,7 @@ def call_unleashed_api(req: func.HttpRequest, endpoint: str) -> func.HttpRespons
         
         # Add a default page size, but allow it to be overridden
         if 'pageSize' not in filter_params:
-            filter_params['pageSize'] = '200' # A common page size
+            filter_params['pageSize'] = '1000' # A common page size
 
         # Convert the filter params to a query string once. This is used for the signature.
         query_string_for_signature = '&'.join([f"{k}={v}" for k, v in sorted(filter_params.items())])
