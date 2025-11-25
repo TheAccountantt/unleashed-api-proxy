@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, ContentSettings
-import azure.functions as func
+import azure.functions as func 
 
 # Create the FunctionApp with Function-level auth (requires ?code=...)
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
