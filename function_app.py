@@ -270,3 +270,134 @@ def call_unleashed_api(req: func.HttpRequest, endpoint: str) -> func.HttpRespons
         status_code=200,
         headers={"Content-Type": "application/json"}
     )
+
+
+# ============================================================================
+# EU VERSIONS - Using UNLEASHED_API_ID_EU and UNLEASHED_API_KEY_EU
+# ============================================================================
+
+@app.route(route="UnleashedStockOnHand_eu")
+def unleashed_stock_on_hand_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "StockOnHand")
+
+
+@app.route(route="UnleashedCustomers_eu")
+def unleashed_customers_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "Customers")
+
+
+@app.route(route="UnleashedProducts_eu")
+def unleashed_products_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "Products")
+
+
+@app.route(route="UnleashedSalesOrders_eu")
+def unleashed_sales_orders_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "SalesOrders")
+
+
+@app.route(route="UnleashedInvoices_eu")
+def unleashed_invoices_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "Invoices")
+
+
+@app.route(route="UnleashedCreditNotes_eu")
+def unleashed_credit_notes_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "CreditNotes")
+
+
+@app.route(route="UnleashedPurchaseOrders_eu")
+def unleashed_purchase_orders_eu(req: func.HttpRequest) -> func.HttpResponse:
+    return call_unleashed_api_eu(req, "PurchaseOrders")
+
+
+def call_unleashed_api_eu(req: func.HttpRequest, endpoint: str) -> func.HttpResponse:
+    """
+    EU version using UNLEASHED_API_ID_EU and UNLEASHED_API_KEY_EU.
+    1. Strip Azure ?code param
+    2. Whitelist only valid filters
+    3. Page through the Unleashed API
+    4. Flatten SalesOrders & Invoices
+    5. Return JSON {"Items": [...]}
+    """
+    logging.info(f"Entering call_unleashed_api_eu for {endpoint}")
+    api_id = os.getenv("UNLEASHED_API_ID_EU")
+    api_key = os.getenv("UNLEASHED_API_KEY_EU")
+    if not api_id or not api_key:
+        return func.HttpResponse(
+            "Missing UNLEASHED_API_ID_EU or UNLEASHED_API_KEY_EU",
+            status_code=400
+        )
+
+    # 1. Prepare filters
+    raw = req.params.copy()
+    raw.pop("code", None)  # drop Azure function key
+    filters = {
+        k: v
+        for k, v in raw.items()
+        if endpoint not in VALID_FILTERS or k in VALID_FILTERS[endpoint]
+    }
+    # always request max pageSize
+    if "pageSize" not in filters:
+        filters["pageSize"] = "1000"
+
+    # Build the sorted query string for signing
+    qs = "&".join(f"{k}={filters[k]}" for k in sorted(filters))
+
+    # Short-circuit if we already have a fresh cached payload
+    cached = try_get_cached_payload(endpoint, filters)
+    if cached is not None:
+        return func.HttpResponse(
+            cached,
+            status_code=200,
+            headers={"Content-Type": "application/json"}
+        )
+
+    # 2. Pagination loop
+    all_items = []
+    page = 1
+    base_url = f"https://api.unleashedsoftware.com/{endpoint}"
+    while True:
+        sig = generate_signature(api_key, qs)
+        headers = {
+            "api-auth-id": api_id,
+            "api-auth-signature": sig,
+            "Accept": "application/json"
+        }
+        url = f"{base_url}/{page}" if page > 1 else base_url
+        resp = requests.get(url, headers=headers, params=filters, timeout=180)
+        if resp.status_code != 200:
+            logging.error(f"{endpoint} page {page} failed: {resp.status_code} {resp.text}")
+            return func.HttpResponse(
+                f"Error fetching {endpoint} page {page}: {resp.text}",
+                status_code=resp.status_code
+            )
+        data = resp.json()
+        items = data.get("Items", [])
+        if not items:
+            break
+        all_items.extend(items)
+        if len(items) < int(filters["pageSize"]):
+            break
+        page += 1
+        time.sleep(0.1)
+
+    # 3. Flatten large collections
+    result = all_items
+    if endpoint == "SalesOrders":
+        result = flatten_sales_orders(all_items)
+    elif endpoint == "Invoices":
+        result = flatten_sales_invoices(all_items)
+
+    # 4. Return
+    payload = {"Items": result}
+    body = json.dumps(payload).encode("utf-8")
+
+    # Persist to cache for the next overlapping call
+    write_cache_payload(endpoint, filters, body)
+
+    return func.HttpResponse(
+        body,
+        status_code=200,
+        headers={"Content-Type": "application/json"}
+    )

@@ -4,4 +4,5 @@
 
 azure-functions>=1.18.0,<2.0.0
 requests
+azure-core>=1.29.0
 azure-storage-blob>=12.19.0
